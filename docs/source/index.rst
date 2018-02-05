@@ -17,6 +17,10 @@ It's recommended for first-time users to begin by going through the
 components and the basic transaction flow.  Once comfortable, continue
 exploring the library for demos, technical specifications, APIs, etc.
 
+.. note:: If you have questions not addressed by this documentation, or run into
+          issues with any of the tutorials, please visit the :doc:`questions`
+          page for some tips on where to find additional help.
+
 Before diving in, watch how Hyperledger Fabric is Building a Blockchain for
 Business:
 
@@ -38,8 +42,9 @@ Business:
    :caption: Key Concepts
 
    blockchain
-   capabilities
+   functionalities
    fabric_model
+   ledger
    usecases
 
 .. toctree::
@@ -48,15 +53,18 @@ Business:
 
    build_network
    write_first_app
+   channel_update
    chaincode
    chaincode4ade
    chaincode4noah
+   systemchaincode
    videos
 
 .. toctree::
    :maxdepth: 2
    :caption: Operations Guide
 
+   upgrade_to_one_point_one
    best_practices
    msp
    configtx
@@ -66,6 +74,9 @@ Business:
    endorsement-policies
    error-handling
    logging-control
+   peer-commands
+   enable_tls
+   kafka
 
 .. toctree::
    :maxdepth: 2
@@ -75,9 +86,9 @@ Business:
    txflow
    Hyperledger Fabric CA's User Guide <http://hyperledger-fabric-ca.readthedocs.io/en/latest>
    fabric-sdks
-   kafka
    channels
-   ledger
+   couchdb_as_state_database
+   peer_event_services
    readwrite
    gossip
 

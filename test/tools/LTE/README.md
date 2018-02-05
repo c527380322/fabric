@@ -1,6 +1,6 @@
 # Ledger Traffic Engine
 
-This readme explains the working and the usage of Ledger Traffic Engine (LTE
+This readme explains the working and the usage of Ledger Traffic Engine (LTE)
 test tool.
 
 
@@ -24,7 +24,7 @@ considered to constitute a single test-run.
 To run all the available tests, run:
 ```
 cd fabric/test/tools/LTE/scripts
-./runbenchmark.sh -f parameters_daily_CI.sh all
+./runbenchmarks.sh -f parameters_daily_CI.sh all
 ```
 where the file `parameters_daily_CI.sh` has all the necessary test parameters.
 
@@ -33,7 +33,7 @@ You can run individual tests without running all the available tests by giving
 the name of the test as parameter, instead of `all`. You can get the available
 test names by:
 ```
-./runbenchmark.sh help
+./runbenchmarks.sh help
 ```
 
 ### What the Tests Do
@@ -104,6 +104,26 @@ The tests can be run with user-defined parameters by creating a new file that
 has all the necessary parameters to run and using that file as the input (see
 the section on how to run the tests) . The names of necessary parameters can be
 found in the file `parameters_daily_CI.sh`.
+
+### Running with optional CouchDB
+
+By default, the tests use golveldb as the state database. Fabric provides the
+option of using CouchDB as a pluggable state database. To run the existing
+tests with CouchDB, use the parameter file `parameters_couchdb_daily_CI.sh`:
+```
+./runbenchmarks.sh -f parameters_couchdb_daily_CI.sh all
+```
+Note that this parameter file (`parameters_couchdb_daily_CI.sh`) contains the
+following line, which is required to run the tests with CouchDB:
+```
+export useCouchDB="yes"
+```
+CouchDB can store values in JSON or binary formats. The following option in
+`parameters_couchdb_daily_CI.sh` is used to switch between JSON and binary
+values:
+```
+UseJSONFormat="true"
+```
 
 ## How to View the Test Results
 

@@ -19,7 +19,6 @@ package mgmt
 import (
 	"testing"
 
-	configvaluesmsp "github.com/hyperledger/fabric/common/config/msp"
 	"github.com/hyperledger/fabric/msp"
 	"github.com/stretchr/testify/assert"
 )
@@ -41,14 +40,7 @@ func TestGetManagerForChains(t *testing.T) {
 }
 
 func TestGetManagerForChains_usingMSPConfigHandlers(t *testing.T) {
-	XXXSetMSPManager("test", &configvaluesmsp.MSPConfigHandler{MSPManager: nil})
-	msp1 := GetManagerForChain("test")
-	// return value should be nil because the MSPManager was not initialized
-	if msp1 != nil {
-		t.Fatal("MSPManager should have been nil")
-	}
-
-	XXXSetMSPManager("foo", &configvaluesmsp.MSPConfigHandler{MSPManager: msp.NewMSPManager()})
+	XXXSetMSPManager("foo", msp.NewMSPManager())
 	msp2 := GetManagerForChain("foo")
 	// return value should be set because the MSPManager was initialized
 	if msp2 == nil {
@@ -57,7 +49,7 @@ func TestGetManagerForChains_usingMSPConfigHandlers(t *testing.T) {
 }
 
 func TestGetIdentityDeserializer(t *testing.T) {
-	XXXSetMSPManager("baz", &configvaluesmsp.MSPConfigHandler{MSPManager: msp.NewMSPManager()})
+	XXXSetMSPManager("baz", msp.NewMSPManager())
 	ids := GetIdentityDeserializer("baz")
 	assert.NotNil(t, ids)
 	ids = GetIdentityDeserializer("")
@@ -67,4 +59,25 @@ func TestGetIdentityDeserializer(t *testing.T) {
 func TestGetLocalSigningIdentityOrPanic(t *testing.T) {
 	sid := GetLocalSigningIdentityOrPanic()
 	assert.NotNil(t, sid)
+}
+
+func TestUpdateLocalMspCache(t *testing.T) {
+	// reset localMsp to force it to be initialized on the first call
+	localMsp = nil
+
+	// first call should initialize local MSP and returned the cached version
+	firstMsp := GetLocalMSP()
+	// second call should return the same
+	secondMsp := GetLocalMSP()
+	// third call should return the same
+	thirdMsp := GetLocalMSP()
+
+	// the same (non-cached if not patched) instance
+	if thirdMsp != secondMsp {
+		t.Fatalf("thirdMsp != secondMsp")
+	}
+	// first (cached) and second (non-cached) different unless patched
+	if firstMsp != secondMsp {
+		t.Fatalf("firstMsp != secondMsp")
+	}
 }

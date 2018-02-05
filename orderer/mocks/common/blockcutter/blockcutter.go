@@ -14,27 +14,31 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package mocks
+package blockcutter
 
 import (
+	"github.com/hyperledger/fabric/common/flogging"
 	cb "github.com/hyperledger/fabric/protos/common"
-)
-
-import (
 	"github.com/op/go-logging"
 )
 
-var logger = logging.MustGetLogger("orderer/mocks/blockcutter")
+const pkgLogID = "orderer/mocks/common/blockcutter"
+
+var logger *logging.Logger
+
+func init() {
+	logger = flogging.MustGetLogger(pkgLogID)
+}
 
 // Receiver mocks the blockcutter.Receiver interface
 type Receiver struct {
-	// QueueNext causes Ordered returns nil false when not set to true
-	QueueNext bool
-
-	// IsolatedTx causes Ordered returns [][]{curBatch, []{newTx}}, true when set to true
+	// IsolatedTx causes Ordered returns [][]{curBatch, []{newTx}}, false when set to true
 	IsolatedTx bool
 
-	// CutNext causes Ordered returns [][]{append(curBatch, newTx)}, true when set to true
+	// CutAncestors causes Ordered returns [][]{curBatch}, true when set to true
+	CutAncestors bool
+
+	// CutNext causes Ordered returns [][]{append(curBatch, newTx)}, false when set to true
 	CutNext bool
 
 	// CurBatch is the currently outstanding messages in the batch
@@ -45,13 +49,13 @@ type Receiver struct {
 	Block chan struct{}
 }
 
-// NewReceiver returns the mock blockcutter.Receiver implemenation
+// NewReceiver returns the mock blockcutter.Receiver implementation
 func NewReceiver() *Receiver {
 	return &Receiver{
-		QueueNext:  true,
-		IsolatedTx: false,
-		CutNext:    false,
-		Block:      make(chan struct{}),
+		IsolatedTx:   false,
+		CutAncestors: false,
+		CutNext:      false,
+		Block:        make(chan struct{}),
 	}
 }
 
@@ -61,25 +65,27 @@ func (mbc *Receiver) Ordered(env *cb.Envelope) ([][]*cb.Envelope, bool) {
 		<-mbc.Block
 	}()
 
-	if !mbc.QueueNext {
-		logger.Debugf("Not queueing message")
-		return nil, false
-	}
-
 	if mbc.IsolatedTx {
 		logger.Debugf("Receiver: Returning dual batch")
-		res := [][]*cb.Envelope{mbc.CurBatch, []*cb.Envelope{env}}
+		res := [][]*cb.Envelope{mbc.CurBatch, {env}}
 		mbc.CurBatch = nil
+		return res, false
+	}
+
+	if mbc.CutAncestors {
+		logger.Debugf("Receiver: Returning current batch and appending newest env")
+		res := [][]*cb.Envelope{mbc.CurBatch}
+		mbc.CurBatch = []*cb.Envelope{env}
 		return res, true
 	}
 
 	mbc.CurBatch = append(mbc.CurBatch, env)
 
 	if mbc.CutNext {
-		logger.Debugf("Returning regular batch")
+		logger.Debugf("Receiver: Returning regular batch")
 		res := [][]*cb.Envelope{mbc.CurBatch}
 		mbc.CurBatch = nil
-		return res, true
+		return res, false
 	}
 
 	logger.Debugf("Appending to batch")

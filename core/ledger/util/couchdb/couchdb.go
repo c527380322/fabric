@@ -38,6 +38,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/hyperledger/fabric/common/flogging"
+	"github.com/hyperledger/fabric/core/ledger/ledgerconfig"
 	logging "github.com/op/go-logging"
 )
 
@@ -104,11 +105,13 @@ type QueryResponse struct {
 	Docs    []json.RawMessage `json:"docs"`
 }
 
-//Doc is used for capturing if attachments are return in the query from CouchDB
-type Doc struct {
-	ID          string          `json:"_id"`
-	Rev         string          `json:"_rev"`
-	Attachments json.RawMessage `json:"_attachments"`
+// DocMetadata is used for capturing CouchDB document header info,
+// used to capture id, version, rev and determine if attachments are returned in the query from CouchDB
+type DocMetadata struct {
+	ID              string          `json:"_id"`
+	Rev             string          `json:"_rev"`
+	Version         string          `json:"~version"`
+	AttachmentsInfo json.RawMessage `json:"_attachments"`
 }
 
 //DocID is a minimal structure for capturing the ID from a query result
@@ -120,7 +123,7 @@ type DocID struct {
 type QueryResult struct {
 	ID          string
 	Value       []byte
-	Attachments []*Attachment
+	Attachments []*AttachmentInfo
 }
 
 //CouchConnectionDef contains parameters
@@ -152,19 +155,12 @@ type DBReturn struct {
 	Reason     string `json:"reason"`
 }
 
-//Attachment contains the definition for an attached file for couchdb
-type Attachment struct {
+//AttachmentInfo contains the definition for an attached file for couchdb
+type AttachmentInfo struct {
 	Name            string
 	ContentType     string
 	Length          uint64
 	AttachmentBytes []byte
-}
-
-//DocMetadata returns the ID, version and revision for a couchdb document
-type DocMetadata struct {
-	ID      string
-	Rev     string
-	Version string
 }
 
 //FileDetails defines the structure needed to send an attachment to couchdb
@@ -177,17 +173,17 @@ type FileDetails struct {
 //CouchDoc defines the structure for a JSON document value
 type CouchDoc struct {
 	JSONValue   []byte
-	Attachments []*Attachment
+	Attachments []*AttachmentInfo
 }
 
-//BatchRetrieveDocMedatadataResponse is used for processing REST batch responses from CouchDB
-type BatchRetrieveDocMedatadataResponse struct {
+//BatchRetrieveDocMetadataResponse is used for processing REST batch responses from CouchDB
+type BatchRetrieveDocMetadataResponse struct {
 	Rows []struct {
-		ID  string `json:"id"`
-		Doc struct {
+		ID          string `json:"id"`
+		DocMetadata struct {
 			ID      string `json:"_id"`
 			Rev     string `json:"_rev"`
-			Version string `json:"version"`
+			Version string `json:"~version"`
 		} `json:"doc"`
 	} `json:"rows"`
 }
@@ -205,6 +201,27 @@ type BatchUpdateResponse struct {
 type Base64Attachment struct {
 	ContentType    string `json:"content_type"`
 	AttachmentData string `json:"data"`
+}
+
+//ListIndexResponse contains the definition for listing couchdb indexes
+type ListIndexResponse struct {
+	TotalRows int               `json:"total_rows"`
+	Indexes   []IndexDefinition `json:"indexes"`
+}
+
+//IndexDefinition contains the definition for a couchdb index
+type IndexDefinition struct {
+	DesignDocument string          `json:"ddoc"`
+	Name           string          `json:"name"`
+	Type           string          `json:"type"`
+	Definition     json.RawMessage `json:"def"`
+}
+
+//IndexResult contains the definition for a couchdb index
+type IndexResult struct {
+	DesignDocument string `json:"designdoc"`
+	Name           string `json:"name"`
+	Definition     string `json:"definition"`
 }
 
 // closeResponseBody discards the body and then closes it to enable returning it to
@@ -279,7 +296,7 @@ func (dbclient *CouchDatabase) CreateDatabaseIfNotExist() (*DBOperationResponse,
 		json.NewDecoder(resp.Body).Decode(&dbResponse)
 
 		if dbResponse.Ok == true {
-			logger.Debugf("Created database %s ", dbclient.DBName)
+			logger.Infof("Created state database %s", dbclient.DBName)
 		}
 
 		logger.Debugf("Exiting CreateDatabaseIfNotExist()")
@@ -367,7 +384,6 @@ func (couchInstance *CouchInstance) VerifyCouchConfig() (*ConnectionInfo, *DBRet
 			logger.Debugf("VerifyConnection() dbResponseJSON: %s", dbResponseJSON)
 		}
 	}
-
 	//check to see if the system databases exist
 	//Verifying the existence of the system database accomplishes two steps
 	//1.  Ensures the system databases are created
@@ -448,6 +464,14 @@ func (dbclient *CouchDatabase) EnsureFullCommit() (*DBOperationResponse, error) 
 
 	if dbResponse.Ok == true {
 		logger.Debugf("_ensure_full_commit database %s ", dbclient.DBName)
+	}
+
+	//Check to see if autoWarmIndexes is enabled
+	//If autoWarmIndexes is enabled, indexes will be refreshed after each block's
+	//data has been committed to the state database
+	if ledgerconfig.IsAutoWarmIndexesEnabled() {
+		//Use a go routine to launch WarmIndexAllIndexes(), this will execute as a background process
+		go dbclient.runWarmIndexAllIndexes()
 	}
 
 	logger.Debugf("Exiting EnsureFullCommit()")
@@ -653,7 +677,7 @@ func getRevisionHeader(resp *http.Response) (string, error) {
 //from the database by id
 func (dbclient *CouchDatabase) ReadDoc(id string) (*CouchDoc, string, error) {
 	var couchDoc CouchDoc
-	attachments := []*Attachment{}
+	attachments := []*AttachmentInfo{}
 
 	logger.Debugf("Entering ReadDoc()  id=[%s]", id)
 	if !utf8.ValidString(id) {
@@ -728,7 +752,7 @@ func (dbclient *CouchDatabase) ReadDoc(id string) (*CouchDoc, string, error) {
 			default:
 
 				//Create an attachment structure and load it
-				attachment := &Attachment{}
+				attachment := &AttachmentInfo{}
 				attachment.ContentType = p.Header.Get("Content-Type")
 				contentDispositionParts := strings.Split(p.Header.Get("Content-Disposition"), ";")
 				if strings.TrimSpace(contentDispositionParts[0]) == "attachment" {
@@ -809,7 +833,6 @@ func (dbclient *CouchDatabase) ReadDocRange(startKey, endKey string, limit, skip
 	//Append the startKey if provided
 
 	if startKey != "" {
-		var err error
 		if startKey, err = encodeForJSON(startKey); err != nil {
 			return nil, err
 		}
@@ -860,29 +883,29 @@ func (dbclient *CouchDatabase) ReadDocRange(startKey, endKey string, limit, skip
 
 	for _, row := range jsonResponse.Rows {
 
-		var jsonDoc = &Doc{}
-		err3 := json.Unmarshal(row.Doc, &jsonDoc)
+		var docMetadata = &DocMetadata{}
+		err3 := json.Unmarshal(row.Doc, &docMetadata)
 		if err3 != nil {
 			return nil, err3
 		}
 
-		if jsonDoc.Attachments != nil {
+		if docMetadata.AttachmentsInfo != nil {
 
-			logger.Debugf("Adding JSON document and attachments for id: %s", jsonDoc.ID)
+			logger.Debugf("Adding JSON document and attachments for id: %s", docMetadata.ID)
 
-			couchDoc, _, err := dbclient.ReadDoc(jsonDoc.ID)
+			couchDoc, _, err := dbclient.ReadDoc(docMetadata.ID)
 			if err != nil {
 				return nil, err
 			}
 
-			var addDocument = &QueryResult{jsonDoc.ID, couchDoc.JSONValue, couchDoc.Attachments}
+			var addDocument = &QueryResult{docMetadata.ID, couchDoc.JSONValue, couchDoc.Attachments}
 			results = append(results, *addDocument)
 
 		} else {
 
-			logger.Debugf("Adding json docment for id: %s", jsonDoc.ID)
+			logger.Debugf("Adding json docment for id: %s", docMetadata.ID)
 
-			var addDocument = &QueryResult{jsonDoc.ID, row.Doc, nil}
+			var addDocument = &QueryResult{docMetadata.ID, row.Doc, nil}
 			results = append(results, *addDocument)
 
 		}
@@ -981,26 +1004,26 @@ func (dbclient *CouchDatabase) QueryDocuments(query string) (*[]QueryResult, err
 
 	for _, row := range jsonResponse.Docs {
 
-		var jsonDoc = &Doc{}
-		err3 := json.Unmarshal(row, &jsonDoc)
+		var docMetadata = &DocMetadata{}
+		err3 := json.Unmarshal(row, &docMetadata)
 		if err3 != nil {
 			return nil, err3
 		}
 
-		if jsonDoc.Attachments != nil {
+		if docMetadata.AttachmentsInfo != nil {
 
-			logger.Debugf("Adding JSON docment and attachments for id: %s", jsonDoc.ID)
+			logger.Debugf("Adding JSON docment and attachments for id: %s", docMetadata.ID)
 
-			couchDoc, _, err := dbclient.ReadDoc(jsonDoc.ID)
+			couchDoc, _, err := dbclient.ReadDoc(docMetadata.ID)
 			if err != nil {
 				return nil, err
 			}
-			var addDocument = &QueryResult{ID: jsonDoc.ID, Value: couchDoc.JSONValue, Attachments: couchDoc.Attachments}
+			var addDocument = &QueryResult{ID: docMetadata.ID, Value: couchDoc.JSONValue, Attachments: couchDoc.Attachments}
 			results = append(results, *addDocument)
 
 		} else {
-			logger.Debugf("Adding json docment for id: %s", jsonDoc.ID)
-			var addDocument = &QueryResult{ID: jsonDoc.ID, Value: row, Attachments: nil}
+			logger.Debugf("Adding json docment for id: %s", docMetadata.ID)
+			var addDocument = &QueryResult{ID: docMetadata.ID, Value: row, Attachments: nil}
 
 			results = append(results, *addDocument)
 
@@ -1012,19 +1035,217 @@ func (dbclient *CouchDatabase) QueryDocuments(query string) (*[]QueryResult, err
 
 }
 
-//BatchRetrieveIDRevision - batch method to retrieve IDs and revisions
-func (dbclient *CouchDatabase) BatchRetrieveIDRevision(keys []string) ([]*DocMetadata, error) {
+// ListIndex method lists the defined indexes for a database
+func (dbclient *CouchDatabase) ListIndex() (*[]IndexResult, error) {
 
-	batchURL, err := url.Parse(dbclient.CouchInstance.conf.URL)
+	logger.Debugf("Entering ListIndex()")
+
+	indexURL, err := url.Parse(dbclient.CouchInstance.conf.URL)
 	if err != nil {
 		logger.Errorf("URL parse error: %s", err.Error())
 		return nil, err
 	}
-	batchURL.Path = dbclient.DBName + "/_all_docs"
 
-	queryParms := batchURL.Query()
+	indexURL.Path = dbclient.DBName + "/_index/"
+
+	//get the number of retries
+	maxRetries := dbclient.CouchInstance.conf.MaxRetries
+
+	resp, _, err := dbclient.CouchInstance.handleRequest(http.MethodGet, indexURL.String(), nil, "", "", maxRetries, true)
+	if err != nil {
+		return nil, err
+	}
+	defer closeResponseBody(resp)
+
+	//handle as JSON document
+	jsonResponseRaw, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	var jsonResponse = &ListIndexResponse{}
+
+	err2 := json.Unmarshal(jsonResponseRaw, &jsonResponse)
+	if err2 != nil {
+		return nil, err2
+	}
+
+	var results []IndexResult
+
+	for _, row := range jsonResponse.Indexes {
+
+		//if the DesignDocument does not begin with "_design/", then this is a system
+		//level index and is not meaningful and cannot be edited or deleted
+		designDoc := row.DesignDocument
+		s := strings.SplitAfterN(designDoc, "_design/", 2)
+		if len(s) > 1 {
+			designDoc = s[1]
+
+			//Add the index definition to the results
+			var addIndexResult = &IndexResult{DesignDocument: designDoc, Name: row.Name, Definition: fmt.Sprintf("%s", row.Definition)}
+			results = append(results, *addIndexResult)
+		}
+
+	}
+
+	logger.Debugf("Exiting ListIndex()")
+
+	return &results, nil
+
+}
+
+// CreateIndex method provides a function creating an index
+func (dbclient *CouchDatabase) CreateIndex(indexdefinition string) error {
+
+	logger.Debugf("Entering CreateIndex()  indexdefinition=%s", indexdefinition)
+
+	//Test to see if this is a valid JSON
+	if IsJSON(indexdefinition) != true {
+		return fmt.Errorf("JSON format is not valid")
+	}
+
+	indexURL, err := url.Parse(dbclient.CouchInstance.conf.URL)
+	if err != nil {
+		logger.Errorf("URL parse error: %s", err.Error())
+		return err
+	}
+
+	indexURL.Path = dbclient.DBName + "/_index"
+
+	//get the number of retries
+	maxRetries := dbclient.CouchInstance.conf.MaxRetries
+
+	resp, _, err := dbclient.CouchInstance.handleRequest(http.MethodPost, indexURL.String(), []byte(indexdefinition), "", "", maxRetries, true)
+	if err != nil {
+		return err
+	}
+	defer closeResponseBody(resp)
+
+	logger.Infof("Created CouchDB index in state database %s", dbclient.DBName)
+
+	return nil
+
+}
+
+// DeleteIndex method provides a function deleting an index
+func (dbclient *CouchDatabase) DeleteIndex(designdoc, indexname string) error {
+
+	logger.Debugf("Entering DeleteIndex()  designdoc=%s  indexname=%s", designdoc, indexname)
+
+	indexURL, err := url.Parse(dbclient.CouchInstance.conf.URL)
+	if err != nil {
+		logger.Errorf("URL parse error: %s", err.Error())
+		return err
+	}
+
+	indexURL.Path = dbclient.DBName + "/_index/" + designdoc + "/json/" + indexname
+
+	//get the number of retries
+	maxRetries := dbclient.CouchInstance.conf.MaxRetries
+
+	resp, _, err := dbclient.CouchInstance.handleRequest(http.MethodDelete, indexURL.String(), nil, "", "", maxRetries, true)
+	if err != nil {
+		return err
+	}
+	defer closeResponseBody(resp)
+
+	return nil
+
+}
+
+//WarmIndex method provides a function for warming a single index
+func (dbclient *CouchDatabase) WarmIndex(designdoc, indexname string) error {
+
+	logger.Debugf("Entering WarmIndex()  designdoc=%s  indexname=%s", designdoc, indexname)
+
+	indexURL, err := url.Parse(dbclient.CouchInstance.conf.URL)
+	if err != nil {
+		logger.Errorf("URL parse error: %s", err.Error())
+		return err
+	}
+
+	//URL to execute the view function associated with the index
+	indexURL.Path = dbclient.DBName + "/_design/" + designdoc + "/_view/" + indexname
+
+	queryParms := indexURL.Query()
+	//Query parameter that allows the execution of the URL to return immediately
+	//The update_after will cause the index update to run after the URL returns
+	queryParms.Add("stale", "update_after")
+	indexURL.RawQuery = queryParms.Encode()
+
+	//get the number of retries
+	maxRetries := dbclient.CouchInstance.conf.MaxRetries
+
+	resp, _, err := dbclient.CouchInstance.handleRequest(http.MethodGet, indexURL.String(), nil, "", "", maxRetries, true)
+	if err != nil {
+		return err
+	}
+	defer closeResponseBody(resp)
+
+	return nil
+
+}
+
+//runWarmIndexAllIndexes is a wrapper for WarmIndexAllIndexes to catch and report any errors
+func (dbclient *CouchDatabase) runWarmIndexAllIndexes() {
+
+	err := dbclient.WarmIndexAllIndexes()
+	if err != nil {
+		logger.Errorf("Error detected during WarmIndexAllIndexes(): %s", err.Error())
+	}
+
+}
+
+//WarmIndexAllIndexes method provides a function for warming all indexes for a database
+func (dbclient *CouchDatabase) WarmIndexAllIndexes() error {
+
+	logger.Debugf("Entering WarmIndexAllIndexes()")
+
+	//Retrieve all indexes
+	listResult, err := dbclient.ListIndex()
+	if err != nil {
+		return err
+	}
+
+	//For each index definition, execute an index refresh
+	for _, elem := range *listResult {
+
+		err := dbclient.WarmIndex(elem.DesignDocument, elem.Name)
+		if err != nil {
+			return err
+		}
+
+	}
+
+	logger.Debugf("Exiting WarmIndexAllIndexes()")
+
+	return nil
+
+}
+
+//BatchRetrieveDocumentMetadata - batch method to retrieve document metadata for  a set of keys,
+// including ID, couchdb revision number, and ledger version
+func (dbclient *CouchDatabase) BatchRetrieveDocumentMetadata(keys []string) ([]*DocMetadata, error) {
+
+	logger.Debugf("Entering BatchRetrieveDocumentMetadata()  keys=%s", keys)
+
+	batchRetrieveURL, err := url.Parse(dbclient.CouchInstance.conf.URL)
+	if err != nil {
+		logger.Errorf("URL parse error: %s", err.Error())
+		return nil, err
+	}
+	batchRetrieveURL.Path = dbclient.DBName + "/_all_docs"
+
+	queryParms := batchRetrieveURL.Query()
+
+	// While BatchRetrieveDocumentMetadata() does not return the entire document,
+	// for reads/writes, we do need to get document so that we can get the ledger version of the key.
+	// TODO For blind writes we do not need to get the version, therefore when we bulk get
+	// the revision numbers for the write keys that were not represented in read set
+	// (the second time BatchRetrieveDocumentMetadata is called during block processing),
+	// we could set include_docs to false to optimize the response.
 	queryParms.Add("include_docs", "true")
-	batchURL.RawQuery = queryParms.Encode()
+	batchRetrieveURL.RawQuery = queryParms.Encode()
 
 	keymap := make(map[string]interface{})
 
@@ -1038,7 +1259,7 @@ func (dbclient *CouchDatabase) BatchRetrieveIDRevision(keys []string) ([]*DocMet
 	//get the number of retries
 	maxRetries := dbclient.CouchInstance.conf.MaxRetries
 
-	resp, _, err := dbclient.CouchInstance.handleRequest(http.MethodPost, batchURL.String(), jsonKeys, "", "", maxRetries, true)
+	resp, _, err := dbclient.CouchInstance.handleRequest(http.MethodPost, batchRetrieveURL.String(), jsonKeys, "", "", maxRetries, true)
 	if err != nil {
 		return nil, err
 	}
@@ -1056,35 +1277,44 @@ func (dbclient *CouchDatabase) BatchRetrieveIDRevision(keys []string) ([]*DocMet
 		return nil, err
 	}
 
-	var jsonResponse = &BatchRetrieveDocMedatadataResponse{}
+	var jsonResponse = &BatchRetrieveDocMetadataResponse{}
 
 	err2 := json.Unmarshal(jsonResponseRaw, &jsonResponse)
 	if err2 != nil {
 		return nil, err2
 	}
 
-	revisionDocs := []*DocMetadata{}
+	docMetadataArray := []*DocMetadata{}
 
 	for _, row := range jsonResponse.Rows {
-		revisionDoc := &DocMetadata{ID: row.ID, Rev: row.Doc.Rev, Version: row.Doc.Version}
-		revisionDocs = append(revisionDocs, revisionDoc)
+		docMetadata := &DocMetadata{ID: row.ID, Rev: row.DocMetadata.Rev, Version: row.DocMetadata.Version}
+		docMetadataArray = append(docMetadataArray, docMetadata)
 	}
 
-	return revisionDocs, nil
+	logger.Debugf("Exiting BatchRetrieveDocumentMetadata()")
+
+	return docMetadataArray, nil
 
 }
 
 //BatchUpdateDocuments - batch method to batch update documents
 func (dbclient *CouchDatabase) BatchUpdateDocuments(documents []*CouchDoc) ([]*BatchUpdateResponse, error) {
 
-	logger.Debugf("Entering BatchUpdateDocuments()  documents=%v", documents)
+	if logger.IsEnabledFor(logging.DEBUG) {
+		documentIdsString, err := printDocumentIds(documents)
+		if err == nil {
+			logger.Debugf("Entering BatchUpdateDocuments()  document ids=[%s]", documentIdsString)
+		} else {
+			logger.Debugf("Entering BatchUpdateDocuments()  Could not print document ids due to error:" + err.Error())
+		}
+	}
 
-	batchURL, err := url.Parse(dbclient.CouchInstance.conf.URL)
+	batchUpdateURL, err := url.Parse(dbclient.CouchInstance.conf.URL)
 	if err != nil {
 		logger.Errorf("URL parse error: %s", err.Error())
 		return nil, err
 	}
-	batchURL.Path = dbclient.DBName + "/_bulk_docs"
+	batchUpdateURL.Path = dbclient.DBName + "/_bulk_docs"
 
 	documentMap := make(map[string]interface{})
 
@@ -1124,7 +1354,7 @@ func (dbclient *CouchDatabase) BatchUpdateDocuments(documents []*CouchDoc) ([]*B
 	//Add the documents to the "docs" item
 	documentMap["docs"] = jsonDocumentMap
 
-	jsonKeys, err := json.Marshal(documentMap)
+	bulkDocsJSON, err := json.Marshal(documentMap)
 
 	if err != nil {
 		return nil, err
@@ -1133,7 +1363,7 @@ func (dbclient *CouchDatabase) BatchUpdateDocuments(documents []*CouchDoc) ([]*B
 	//get the number of retries
 	maxRetries := dbclient.CouchInstance.conf.MaxRetries
 
-	resp, _, err := dbclient.CouchInstance.handleRequest(http.MethodPost, batchURL.String(), jsonKeys, "", "", maxRetries, true)
+	resp, _, err := dbclient.CouchInstance.handleRequest(http.MethodPost, batchUpdateURL.String(), bulkDocsJSON, "", "", maxRetries, true)
 	if err != nil {
 		return nil, err
 	}
@@ -1152,13 +1382,12 @@ func (dbclient *CouchDatabase) BatchUpdateDocuments(documents []*CouchDoc) ([]*B
 	}
 
 	var jsonResponse = []*BatchUpdateResponse{}
-
 	err2 := json.Unmarshal(jsonResponseRaw, &jsonResponse)
 	if err2 != nil {
 		return nil, err2
 	}
 
-	logger.Debugf("Exiting BatchUpdateDocuments()")
+	logger.Debugf("Exiting BatchUpdateDocuments() _bulk_docs response=[%s]", string(jsonResponseRaw))
 
 	return jsonResponse, nil
 
@@ -1171,7 +1400,7 @@ func (dbclient *CouchDatabase) BatchUpdateDocuments(documents []*CouchDoc) ([]*B
 func (dbclient *CouchDatabase) handleRequestWithRevisionRetry(id, method string, connectURL url.URL, data []byte, rev string,
 	multipartBoundary string, maxRetries int, keepConnectionOpen bool) (*http.Response, *DBReturn, error) {
 
-	//Initialize a flag for the revsion conflict
+	//Initialize a flag for the revision conflict
 	revisionConflictDetected := false
 	var resp *http.Response
 	var couchDBReturn *DBReturn
@@ -1395,13 +1624,22 @@ func IsJSON(s string) bool {
 	return json.Unmarshal([]byte(s), &js) == nil
 }
 
-// encodePathElement uses Golang for encoding and in addition, replaces a '/' by %2F.
-// Otherwise, in the regular encoding, a '/' is treated as a path separator in the url
+// encodePathElement uses Golang for url path encoding, additionally:
+// '/' is replaced by %2F, otherwise path encoding will treat as path separator and ignore it
+// '+' is replaced by %2B, otherwise path encoding will ignore it, while CouchDB will unencode the plus as a space
+// Note that all other URL special characters have been tested successfully without need for special handling
 func encodePathElement(str string) string {
+
+	logger.Debugf("Entering encodePathElement()  string=%s", str)
+
 	u := &url.URL{}
 	u.Path = str
-	encodedStr := u.String()
+	encodedStr := u.EscapedPath() // url encode using golang url path encoding rules
 	encodedStr = strings.Replace(encodedStr, "/", "%2F", -1)
+	encodedStr = strings.Replace(encodedStr, "+", "%2B", -1)
+
+	logger.Debugf("Exiting encodePathElement()  encodedStr=%s", encodedStr)
+
 	return encodedStr
 }
 
@@ -1414,4 +1652,21 @@ func encodeForJSON(str string) (string, error) {
 	// Encode adds double quotes to string and terminates with \n - stripping them as bytes as they are all ascii(0-127)
 	buffer := buf.Bytes()
 	return string(buffer[1 : len(buffer)-2]), nil
+}
+
+// printDocumentIds is a convenience method to print readable log entries for arrays of pointers
+// to couch document IDs
+func printDocumentIds(documentPointers []*CouchDoc) (string, error) {
+
+	documentIds := []string{}
+
+	for _, documentPointer := range documentPointers {
+		docMetadata := &DocMetadata{}
+		err := json.Unmarshal(documentPointer.JSONValue, &docMetadata)
+		if err != nil {
+			return "", err
+		}
+		documentIds = append(documentIds, docMetadata.ID)
+	}
+	return strings.Join(documentIds, ","), nil
 }

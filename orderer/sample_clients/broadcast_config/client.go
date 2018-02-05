@@ -23,8 +23,7 @@ import (
 
 	"google.golang.org/grpc"
 
-	genesisconfig "github.com/hyperledger/fabric/common/configtx/tool/localconfig"
-	"github.com/hyperledger/fabric/msp"
+	genesisconfig "github.com/hyperledger/fabric/common/tools/configtxgen/localconfig"
 	mspmgmt "github.com/hyperledger/fabric/msp/mgmt"
 	"github.com/hyperledger/fabric/orderer/common/localconfig"
 	cb "github.com/hyperledger/fabric/protos/common"
@@ -33,7 +32,6 @@ import (
 
 var conf *config.TopLevel
 var genConf *genesisconfig.Profile
-var signer msp.SigningIdentity
 
 type broadcastClient struct {
 	ab.AtomicBroadcast_BroadcastClient
@@ -72,7 +70,6 @@ type argsImpl struct {
 
 func init() {
 	conf = config.Load()
-	genConf = genesisconfig.Load(genesisconfig.SampleInsecureProfile)
 
 	// Load local MSP
 	err := mspmgmt.LoadLocalMsp(conf.General.LocalMSPDir, conf.General.BCCSP, conf.General.LocalMSPID)
@@ -80,11 +77,7 @@ func init() {
 		panic(fmt.Errorf("Failed to initialize local MSP: %s", err))
 	}
 
-	msp := mspmgmt.GetLocalMSP()
-	signer, err = msp.GetDefaultSigningIdentity()
-	if err != nil {
-		panic(fmt.Errorf("Failed to initialize get default signer: %s", err))
-	}
+	genConf = genesisconfig.Load(conf.General.GenesisProfile)
 }
 
 func main() {
@@ -95,7 +88,7 @@ func main() {
 	flag.StringVar(&cmd.name, "cmd", "newChain", "The action that this client is requesting via the config transaction.")
 	flag.StringVar(&cmd.args.consensusType, "consensusType", genConf.Orderer.OrdererType, "In case of a newChain command, the type of consensus the ordering service is running on.")
 	flag.StringVar(&cmd.args.creationPolicy, "creationPolicy", "AcceptAllPolicy", "In case of a newChain command, the chain creation policy this request should be validated against.")
-	flag.StringVar(&cmd.args.chainID, "chainID", "NewChannelId", "In case of a newChain command, the chain ID to create.")
+	flag.StringVar(&cmd.args.chainID, "chainID", "mychannel", "In case of a newChain command, the chain ID to create.")
 	flag.Parse()
 
 	conn, err := grpc.Dial(srv, grpc.WithInsecure())

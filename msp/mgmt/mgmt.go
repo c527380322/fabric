@@ -20,19 +20,33 @@ import (
 	"reflect"
 	"sync"
 
-	"errors"
-
 	"github.com/hyperledger/fabric/bccsp/factory"
-	configvaluesmsp "github.com/hyperledger/fabric/common/config/msp"
 	"github.com/hyperledger/fabric/common/flogging"
 	"github.com/hyperledger/fabric/core/config"
 	"github.com/hyperledger/fabric/msp"
+	"github.com/hyperledger/fabric/msp/cache"
+	"github.com/pkg/errors"
+	"github.com/spf13/viper"
 )
+
+// LoadLocalMspWithType loads the local MSP with the specified type from the specified directory
+func LoadLocalMspWithType(dir string, bccspConfig *factory.FactoryOpts, mspID, mspType string) error {
+	if mspID == "" {
+		return errors.New("the local MSP must have an ID")
+	}
+
+	conf, err := msp.GetLocalMspConfigWithType(dir, bccspConfig, mspID, mspType)
+	if err != nil {
+		return err
+	}
+
+	return GetLocalMSP().Setup(conf)
+}
 
 // LoadLocalMsp loads the local MSP from the specified directory
 func LoadLocalMsp(dir string, bccspConfig *factory.FactoryOpts, mspID string) error {
 	if mspID == "" {
-		return errors.New("The local MSP must have an ID")
+		return errors.New("the local MSP must have an ID")
 	}
 
 	conf, err := msp.GetLocalMspConfig(dir, bccspConfig, mspID)
@@ -75,24 +89,12 @@ func GetManagerForChain(chainID string) msp.MSPManager {
 		mspMgr = msp.NewMSPManager()
 		mspMap[chainID] = mspMgr
 	} else {
-		switch mgr := mspMgr.(type) {
-		case *configvaluesmsp.MSPConfigHandler:
-			// check for nil MSPManager interface as it can exist but not be
-			// instantiated
-			if mgr.MSPManager == nil {
-				mspLogger.Debugf("MSPManager is not instantiated; no MSPs are defined for this channel.")
-				// return nil so the MSPManager methods cannot be accidentally called,
-				// which would result in a panic
-				return nil
-			}
-		default:
-			// check for internal mspManagerImpl type. if a different type is found,
-			// it's because a developer has added a new type that implements the
-			// MSPManager interface and should add a case to the logic above to handle
-			// it.
-			if reflect.TypeOf(mgr).Elem().Name() != "mspManagerImpl" {
-				panic("Found unexpected MSPManager type.")
-			}
+		// check for internal mspManagerImpl type. if a different type is found,
+		// it's because a developer has added a new type that implements the
+		// MSPManager interface and should add a case to the logic above to handle
+		// it.
+		if reflect.TypeOf(mspMgr).Elem().Name() != "mspManagerImpl" {
+			panic("Found unexpected MSPManager type.")
 		}
 		mspLogger.Debugf("Returning existing manager for channel '%s'", chainID)
 	}
@@ -114,7 +116,7 @@ func GetDeserializers() map[string]msp.IdentityDeserializer {
 }
 
 // XXXSetMSPManager is a stopgap solution to transition from the custom MSP config block
-// parsing to the configtx.Manager interface, while preserving the problematic singleton
+// parsing to the channelconfig.Resources interface, while preserving the problematic singleton
 // nature of the MSP manager
 func XXXSetMSPManager(chainID string, manager msp.MSPManager) {
 	m.Lock()
@@ -128,6 +130,23 @@ func GetLocalMSP() msp.MSP {
 	var lclMsp msp.MSP
 	var created bool = false
 	{
+		// determine the type of MSP (by default, we'll use bccspMSP)
+		mspType := viper.GetString("peer.localMspType")
+		if mspType == "" {
+			mspType = msp.ProviderTypeToString(msp.FABRIC)
+		}
+
+		// based on the MSP type, generate the new opts
+		var newOpts msp.NewOpts
+		switch mspType {
+		case msp.ProviderTypeToString(msp.FABRIC):
+			newOpts = &msp.BCCSPNewOpts{NewBaseOpts: msp.NewBaseOpts{Version: msp.MSPv1_0}}
+		case msp.ProviderTypeToString(msp.IDEMIX):
+			newOpts = &msp.IdemixNewOpts{msp.NewBaseOpts{Version: msp.MSPv1_1}}
+		default:
+			panic("msp type " + mspType + " unknown")
+		}
+
 		m.Lock()
 		defer m.Unlock()
 
@@ -135,9 +154,22 @@ func GetLocalMSP() msp.MSP {
 		if lclMsp == nil {
 			var err error
 			created = true
-			lclMsp, err = msp.NewBccspMsp()
+
+			mspInst, err := msp.New(newOpts)
 			if err != nil {
-				mspLogger.Fatalf("Failed to initialize local MSP, received err %s", err)
+				mspLogger.Fatalf("Failed to initialize local MSP, received err %+v", err)
+			}
+
+			switch mspType {
+			case msp.ProviderTypeToString(msp.FABRIC):
+				lclMsp, err = cache.New(mspInst)
+				if err != nil {
+					mspLogger.Fatalf("Failed to initialize local MSP, received err %+v", err)
+				}
+			case msp.ProviderTypeToString(msp.IDEMIX):
+				lclMsp = mspInst
+			default:
+				panic("msp type " + mspType + " unknown")
 			}
 			localMsp = lclMsp
 		}
@@ -166,7 +198,7 @@ func GetIdentityDeserializer(chainID string) msp.IdentityDeserializer {
 func GetLocalSigningIdentityOrPanic() msp.SigningIdentity {
 	id, err := GetLocalMSP().GetDefaultSigningIdentity()
 	if err != nil {
-		mspLogger.Panicf("Failed getting local signing identity [%s]", err)
+		mspLogger.Panicf("Failed getting local signing identity [%+v]", err)
 	}
 	return id
 }

@@ -17,8 +17,16 @@ import (
 )
 
 func TestGetVersionInfo(t *testing.T) {
-	expected := fmt.Sprintf("%s:\n Version: %s\n Go version: %s\n OS/Arch: %s",
-		metadata.ProgramName, common.Version, runtime.Version(),
-		fmt.Sprintf("%s/%s", runtime.GOOS, runtime.GOARCH))
+	// This test would always fail for development versions because if
+	// common.Version is not set, the string returned is "development version"
+	// Set it here for this test to avoid this.
+	if common.Version == "" {
+		common.Version = "testVersion"
+	}
+
+	expected := fmt.Sprintf("%s:\n Version: %s\n Go version: %s\n OS/Arch: %s\n"+
+		" Experimental features: %s\n", metadata.ProgramName, common.Version,
+		runtime.Version(), fmt.Sprintf("%s/%s", runtime.GOOS, runtime.GOARCH),
+		common.Experimental)
 	assert.Equal(t, expected, metadata.GetVersionInfo())
 }

@@ -1,17 +1,7 @@
 /*
-Copyright IBM Corp. 2016 All Rights Reserved.
+Copyright IBM Corp. All Rights Reserved.
 
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-                 http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
+SPDX-License-Identifier: Apache-2.0
 */
 
 package multichannel
@@ -19,10 +9,12 @@ package multichannel
 import (
 	"fmt"
 
-	"github.com/hyperledger/fabric/common/config"
+	"github.com/hyperledger/fabric/common/channelconfig"
 	"github.com/hyperledger/fabric/common/configtx"
-	"github.com/hyperledger/fabric/common/configtx/tool/provisional"
+	genesisconfig "github.com/hyperledger/fabric/common/tools/configtxgen/localconfig"
 	"github.com/hyperledger/fabric/orderer/common/blockcutter"
+	"github.com/hyperledger/fabric/orderer/common/msgprocessor"
+	"github.com/hyperledger/fabric/orderer/consensus"
 	cb "github.com/hyperledger/fabric/protos/common"
 	"github.com/hyperledger/fabric/protos/utils"
 )
@@ -30,7 +22,7 @@ import (
 type mockConsenter struct {
 }
 
-func (mc *mockConsenter) HandleChain(support ConsenterSupport, metadata *cb.Metadata) (Chain, error) {
+func (mc *mockConsenter) HandleChain(support consensus.ConsenterSupport, metadata *cb.Metadata) (consensus.Chain, error) {
 	return &mockChain{
 		queue:    make(chan *cb.Envelope),
 		cutter:   support.BlockCutter(),
@@ -43,7 +35,7 @@ func (mc *mockConsenter) HandleChain(support ConsenterSupport, metadata *cb.Meta
 type mockChain struct {
 	queue    chan *cb.Envelope
 	cutter   blockcutter.Receiver
-	support  ConsenterSupport
+	support  consensus.ConsenterSupport
 	metadata *cb.Metadata
 	done     chan struct{}
 }
@@ -52,9 +44,18 @@ func (mch *mockChain) Errored() <-chan struct{} {
 	return nil
 }
 
-func (mch *mockChain) Enqueue(env *cb.Envelope) bool {
+func (mch *mockChain) Order(env *cb.Envelope, configSeq uint64) error {
 	mch.queue <- env
-	return true
+	return nil
+}
+
+func (mch *mockChain) Configure(config *cb.Envelope, configSeq uint64) error {
+	mch.queue <- config
+	return nil
+}
+
+func (mch *mockChain) WaitReady() error {
+	return nil
 }
 
 func (mch *mockChain) Start() {
@@ -66,12 +67,14 @@ func (mch *mockChain) Start() {
 				return
 			}
 
-			class, err := mch.support.ClassifyMsg(msg)
+			chdr, err := utils.ChannelHeader(msg)
 			if err != nil {
-				logger.Panicf("If a message has arrived to this point, it should already have been classified once")
+				logger.Panicf("If a message has arrived to this point, it should already have had header inspected once: %s", err)
 			}
+
+			class := mch.support.ClassifyMsg(chdr)
 			switch class {
-			case ConfigUpdateMsg:
+			case msgprocessor.ConfigMsg:
 				batch := mch.support.BlockCutter().Cut()
 				if batch != nil {
 					block := mch.support.CreateNextBlock(batch)
@@ -85,12 +88,14 @@ func (mch *mockChain) Start() {
 				}
 				block := mch.support.CreateNextBlock([]*cb.Envelope{msg})
 				mch.support.WriteConfigBlock(block, nil)
-			case NormalMsg:
+			case msgprocessor.NormalMsg:
 				batches, _ := mch.support.BlockCutter().Ordered(msg)
 				for _, batch := range batches {
 					block := mch.support.CreateNextBlock(batch)
 					mch.support.WriteBlock(block, nil)
 				}
+			case msgprocessor.ConfigUpdateMsg:
+				logger.Panicf("Not expecting msg class ConfigUpdateMsg here")
 			default:
 				logger.Panicf("Unsupported msg classification: %v", class)
 			}
@@ -104,20 +109,19 @@ func (mch *mockChain) Halt() {
 
 func makeConfigTx(chainID string, i int) *cb.Envelope {
 	group := cb.NewConfigGroup()
-	group.Groups[config.OrdererGroupKey] = cb.NewConfigGroup()
-	group.Groups[config.OrdererGroupKey].Values[fmt.Sprintf("%d", i)] = &cb.ConfigValue{
+	group.Groups[channelconfig.OrdererGroupKey] = cb.NewConfigGroup()
+	group.Groups[channelconfig.OrdererGroupKey].Values[fmt.Sprintf("%d", i)] = &cb.ConfigValue{
 		Value: []byte(fmt.Sprintf("%d", i)),
 	}
-	configTemplate := configtx.NewSimpleTemplate(group)
-	configEnv, err := configTemplate.Envelope(chainID)
-	if err != nil {
-		panic(err)
-	}
-	return makeConfigTxFromConfigUpdateEnvelope(chainID, configEnv)
+	return makeConfigTxFromConfigUpdateEnvelope(chainID, &cb.ConfigUpdateEnvelope{
+		ConfigUpdate: utils.MarshalOrPanic(&cb.ConfigUpdate{
+			WriteSet: group,
+		}),
+	})
 }
 
 func wrapConfigTx(env *cb.Envelope) *cb.Envelope {
-	result, err := utils.CreateSignedEnvelope(cb.HeaderType_ORDERER_TRANSACTION, provisional.TestChainID, mockCrypto(), env, msgVersion, epoch)
+	result, err := utils.CreateSignedEnvelope(cb.HeaderType_ORDERER_TRANSACTION, genesisconfig.TestChainID, mockCrypto(), env, msgVersion, epoch)
 	if err != nil {
 		panic(err)
 	}
